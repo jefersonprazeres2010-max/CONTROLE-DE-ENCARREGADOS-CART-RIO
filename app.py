@@ -5,9 +5,9 @@ from datetime import datetime, date
 
 # 1. MAPEAMENTO HIERÁRQUICO REGULAMENTAR (Cel à Sd)
 ORDEM_HIERARQUICA = {
-    "Cel": 1, "Ten Cel": 2, "Maj": 3, "Cap": 4, 
-    "1º Ten": 5, "2º Ten": 6, "Subten": 7,
-    "1º Sgt": 8, "2º Sgt": 9, "3º Sgt": 10, "Cb": 11, "Sd": 12
+    "CEL": 1, "TEN CEL": 2, "MAJ": 3, "CAP": 4, 
+    "1º TEN": 5, "2º TEN": 6, "SUBTEN": 7,
+    "1º SGT": 8, "2º SGT": 9, "3º SGT": 10, "CB": 11, "SD": 12
 }
 
 HOJE = date(2026, 10, 6)
@@ -23,7 +23,10 @@ st.caption(f"Polícia Militar de Roraima — Data Atual do Sistema: {HOJE.strfti
 # =================================================================================================
 if "procedimentos" not in st.session_state:
     if os.path.exists(ARQUIVO_HISTORICO):
-        st.session_state.procedimentos = pd.read_csv(ARQUIVO_HISTORICO).to_dict(orient="records")
+        try:
+            st.session_state.procedimentos = pd.read_csv(ARQUIVO_HISTORICO).to_dict(orient="records")
+        except:
+            st.session_state.procedimentos = []
     else:
         st.session_state.procedimentos = []
 
@@ -32,11 +35,11 @@ def salvar_dados_automaticamente():
     df_salvar.to_csv(ARQUIVO_HISTORICO, index=False)
 
 # =================================================================================================
-# ENTRADA DA PLANILHA CORRIGIDA (.xlsx)
+# ENTRADA DA PLANILHA NOMINAL
 # =================================================================================================
 st.markdown("### 📊 Banco de Dados do Efetivo")
 arquivo_publicado = st.file_uploader(
-    "Faça o upload da planilha 'planilha_encarregados_corrigida.xlsx' baixada:", 
+    "Faça o upload da sua planilha de militares (Excel ou CSV):", 
     type=["xlsx", "csv"]
 )
 
@@ -50,40 +53,59 @@ else:
         else:
             df_input = pd.read_csv(arquivo_publicado)
             
-        df_input = df_input.rename(columns={col: col.strip() for col in df_input.columns})
+        # MECANISMO ANTIFALHA DE COLUNAS: Limpa e padroniza para letras maiúsculas
+        df_input.columns = df_input.columns.str.strip().str.upper()
         
-        # Injeta colunas de controle do app na memória
-        if "Habilitado" not in df_input.columns:
-            df_input["Habilitado"] = True
-        if "Data_Livre" not in df_input.columns:
-            df_input["Data_Livre"] = date(2026, 9, 1)
+        # Renomeia variações comuns para garantir compatibilidade
+        mapeamento_colunas = {
+            "POSTO/GRAD": "POSTO_GRAD", "POSTO": "POSTO_GRAD", "POSTO_GRADUACAO": "POSTO_GRAD",
+            "NOME": "NOME_COMPLETO", "NOME COMPLETO": "NOME_COMPLETO",
+            "QUADRO": "QUADRO"
+        }
+        df_input = df_input.rename(columns=mapeamento_colunas)
+        
+        # Validação final das colunas tratadas
+        if not {"POSTO_GRAD", "QUADRO", "NOME_COMPLETO"}.issubset(df_input.columns):
+            st.error("❌ Erro: A planilha precisa ter colunas equivalentes a Posto, Quadro e Nome.")
+            st.stop()
             
-        # Sincroniza as datas livres dos militares com os processos salvos no arquivo de persistência
+        # Padroniza também os dados de texto internos para maiúsculo
+        df_input["POSTO_GRAD"] = df_input["POSTO_GRAD"].astype(str).str.strip().str.upper()
+        df_input["QUADRO"] = df_input["QUADRO"].astype(str).str.strip().str.upper()
+        df_input["NOME_COMPLETO"] = df_input["NOME_COMPLETO"].astype(str).str.strip().str.upper()
+
+        # Injeta colunas de controle do app na memória se não existirem
+        if "HABILITADO" not in df_input.columns:
+            df_input["HABILITADO"] = True
+        if "DATA_LIVRE" not in df_input.columns:
+            df_input["DATA_LIVRE"] = date(2026, 9, 1)
+            
+        # Sincroniza as datas livres dos militares com os processos salvos
         for p in st.session_state.procedimentos:
             if p["Status"] == "Em Andamento":
-                df_input.loc[df_input["Nome"] == p["Encarregado_Nome"], "Data_Livre"] = None
+                df_input.loc[df_input["NOME_COMPLETO"] == str(p["Encarregado_Nome"]).upper(), "DATA_LIVRE"] = None
             elif p["Status"] == "Concluído" and pd.notna(p.get("Data_Entrega")):
-                df_input.loc[df_input["Nome"] == p["Encarregado_Nome"], "Data_Livre"] = p["Data_Entrega"]
+                df_input.loc[df_input["NOME_COMPLETO"] == str(p["Encarregado_Nome"]).upper(), "DATA_LIVRE"] = p["Data_Entrega"]
 
         if "militares_db" not in st.session_state or st.sidebar.button("🔄 Sincronizar Efetivo"):
             st.session_state.militares_db = df_input
-            st.success(f"Planilha integrada! {len(df_input)} militares carregados por antiguidade hierárquica.")
+            st.success(f"Planilha integrada! {len(df_input)} militares carregados com sucesso.")
     except Exception as e:
         st.error(f"Erro de processamento: {e}")
         st.stop()
 
 # --- MOTOR DE ORDENAÇÃO POR ESCALA HIERÁRQUICA ---
-nomes_ocupados = [p["Encarregado_Nome"] for p in st.session_state.procedimentos if p["Status"] == "Em Andamento"]
+nomes_ocupados = [str(p["Encarregado_Nome"]).upper() for p in st.session_state.procedimentos if p["Status"] == "Em Andamento"]
 
 df_mestre = st.session_state.militares_db.copy()
-df_mestre["Dias_Livres_Num"] = df_mestre["Data_Livre"].apply(lambda x: (HOJE - pd.to_datetime(x).date()).days if pd.notna(x) else 0)
-df_mestre["Peso_Hierarquico"] = df_mestre["Posto/Grad"].map(ORDEM_HIERARQUICA).fillna(99)
+df_mestre["Dias_Livres_Num"] = df_mestre["DATA_LIVRE"].apply(lambda x: (HOJE - pd.to_datetime(x).date()).days if pd.notna(x) else 0)
+df_mestre["Peso_Hierarquico"] = df_mestre["POSTO_GRAD"].map(ORDEM_HIERARQUICA).fillna(99)
 
 # Ordena por Antiguidade (Cel a Sd). Mesmos postos desempatam por quem está livre há mais tempo.
 df_mestre = df_mestre.sort_values(by=["Peso_Hierarquico", "Dias_Livres_Num"], ascending=[True, False])
 
 def texto_dias(row):
-    if row["Nome"] in nomes_ocupados: return "Em procedimento ativo"
+    if row["NOME_COMPLETO"] in nomes_ocupados: return "Em procedimento ativo"
     return f"Livre há {row['Dias_Livres_Num']} dias"
 df_mestre["Situação / Dias Livres"] = df_mestre.apply(texto_dias, axis=1)
 
@@ -102,8 +124,8 @@ with aba1:
 
     # Trava Legal Militar: Encarregado deve ser Habilitado, Livre e MAIS ANTIGO que o investigado
     df_aptos_escala = df_mestre[
-        (df_mestre["Habilitado"] == True) & 
-        (~df_mestre["Nome"].isin(nomes_ocupados)) & 
+        (df_mestre["HABILITADO"] == True) & 
+        (~df_mestre["NOME_COMPLETO"].isin(nomes_ocupados)) & 
         (df_mestre["Peso_Hierarquico"] <= peso_limite_investigado)
     ]
     
@@ -111,24 +133,24 @@ with aba1:
         st.error(f"❌ Erro de Escala: Não existem Militares Livres com precedência hierárquica para investigar um {posto_investigado}!")
     else:
         with st.form("form_instaurar"):
-            opcoes_select = df_aptos_escala["Posto/Grad"] + " [" + df_aptos_escala["Quadro"] + "] - " + df_aptos_escala["Nome"] + " (" + df_aptos_escala["Situação / Dias Livres"] + ")"
+            opcoes_select = df_aptos_escala["POSTO_GRAD"] + " [" + df_aptos_escala["QUADRO"] + "] - " + df_aptos_escala["NOME_COMPLETO"] + " (" + df_aptos_escala["Situação / Dias Livres"] + ")"
             militar_designado = st.selectbox("Selecione o Encarregado da Lista Filtrada:", opcoes_select)
             
             if st.form_submit_button("Confirmar Designação"):
                 idx_sel = opcoes_select[opcoes_select == militar_designado].index
                 dados_escolhidos = df_aptos_escala.loc[idx_sel]
                 
-                nome_militar = dados_escolhidos["Nome"].values[0]
-                posto_militar = dados_escolhidos["Posto/Grad"].values[0]
+                nome_militar = dados_escolhidos["NOME_COMPLETO"].values[0]
+                posto_militar = dados_escolhidos["POSTO_GRAD"].values[0]
                 
                 st.session_state.procedimentos.append({
                     "Portaria": num_portaria, "Tipo": tipo_procedimento,
                     "Encarregado_Nome": nome_militar, "Posto": posto_militar,
                     "Investigado_Posto": posto_investigado, "Status": "Em Andamento", "Data_Entrega": None
                 })
-                st.session_state.militares_db.loc[st.session_state.militares_db["Nome"] == nome_militar, "Data_Livre"] = None
+                st.session_state.militares_db.loc[st.session_state.militares_db["NOME_COMPLETO"] == nome_militar, "DATA_LIVRE"] = None
                 salvar_dados_automaticamente()
-                st.success(f"Portaria {num_portaria} registrada e gravada automaticamente!")
+                st.success(f"Portaria {num_portaria} registrada e salva!")
                 st.rerun()
 
 # ---- ABA 2: REGISTRAR ENTREGA DE FEITOS ----
@@ -146,12 +168,12 @@ with aba2:
         if st.button("Homologar Entrega e Liberar Militar"):
             p_alvo = procedimento_escolhido.split(" | ")[0]
             for p in st.session_state.procedimentos:
-                if p["Portaria"] == p_alvo:
+                if str(p["Portaria"]) == str(p_alvo):
                     p["Status"] = "Concluído"
                     p["Data_Entrega"] = str(data_de_entrega)
-                    st.session_state.militares_db.loc[st.session_state.militares_db["Nome"] == p["Encarregado_Nome"], "Data_Livre"] = data_de_entrega
+                    st.session_state.militares_db.loc[st.session_state.militares_db["NOME_COMPLETO"] == str(p["Encarregado_Nome"]).upper(), "DATA_LIVRE"] = data_de_entrega
             salvar_dados_automaticamente()
-            st.success("Militar liberado! Os dados foram salvos no arquivo de persistência.")
+            st.success("Militar liberado com sucesso!")
             st.rerun()
 
 # ---- ABA 3: RELAÇÕES NOMINAIS ENXUTAS ----
@@ -164,25 +186,12 @@ with aba3:
     
     df_filtrado_geral = df_mestre.copy()
     if f_nome:
-        df_filtrado_geral = df_filtrado_geral[df_filtrado_geral["Nome"].str.contains(f_nome, case=False)]
+        df_filtrado_geral = df_filtrado_geral[df_filtrado_geral["NOME_COMPLETO"].str.contains(f_nome, case=False)]
     if f_posto:
-        df_filtrado_geral = df_filtrado_geral[df_filtrado_geral["Posto/Grad"].isin(f_posto)]
+        df_filtrado_geral = df_filtrado_geral[df_filtrado_geral["POSTO_GRAD"].isin(f_posto)]
     if f_dias > 0:
         df_filtrado_geral = df_filtrado_geral[df_filtrado_geral["Dias_Livres_Num"] >= f_dias]
         
     st.markdown("---")
     st.subheader("📋 1ª Relação: Militares Habilitados (Ordem Decrescente de Antiguidade)")
     col_l1, col_l2 = st.columns(2)
-    with col_l1:
-        st.write("🟢 **Livres para Escala**")
-        df_l = df_filtrado_geral[(df_filtrado_geral["Habilitado"] == True) & (~df_filtrado_geral["Nome"].isin(nomes_ocupados))]
-        st.dataframe(df_l[["Posto/Grad", "Quadro", "Nome", "Situação / Dias Livres"]], use_container_width=True, hide_index=True)
-    with col_l2:
-        st.write("🔴 **Com Procedimento Ativo**")
-        df_o = df_filtrado_geral[(df_filtrado_geral["Habilitado"] == True) & (df_filtrado_geral["Nome"].isin(nomes_ocupados))]
-        st.dataframe(df_o[["Posto/Grad", "Quadro", "Nome", "Situação / Dias Livres"]], use_container_width=True, hide_index=True)
-        
-    st.markdown("---")
-    st.subheader("❌ 2ª Relação: Militares Não Habilitados")
-    df_nh = df_filtrado_geral[df_filtrado_geral["Habilitado"] == False]
-    st.dataframe(df_nh[["Posto/Grad", "Quadro", "Nome", "Situação / Dias Livres"]], use_container_width=True, hide_index=True)
